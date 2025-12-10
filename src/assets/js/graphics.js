@@ -94,7 +94,7 @@ let gfx = (function () {
 					
 					line.mesh = BABYLON.MeshBuilder.CreateRibbon('ribbon', {pathArray: [path1, path2], sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
 					line.mesh.material = new BABYLON.StandardMaterial('lineMat', scene);
-					line.mesh.material.ambientTexture = new BABYLON.Texture('./src/img/grass.png', scene);
+					line.mesh.material.ambientTexture = new BABYLON.Texture('/assets/img/grass.png', scene);
 					line.mesh.material.diffuseColor = color.clone();
 					line.mesh.material.emissiveColor = color.clone();
 				}
@@ -158,7 +158,7 @@ let gfx = (function () {
 				
 				stroke.mesh = BABYLON.MeshBuilder.CreateRibbon('userAddedStrokeRibbon', {pathArray: [stroke.path1, stroke.path2], sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
 				stroke.mesh.material = new BABYLON.StandardMaterial('strokeMaterial', scene);
-				stroke.mesh.material.ambientTexture = new BABYLON.Texture('./src/img/grass.png', scene);
+				stroke.mesh.material.ambientTexture = new BABYLON.Texture('/assets/img/grass.png', scene);
 				stroke.mesh.material.diffuseColor = color.clone();
 				stroke.mesh.material.emissiveColor = color.clone();
 			}
