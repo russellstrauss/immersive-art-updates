@@ -147,7 +147,7 @@ let gfx = (function () {
 					colors: stroke.colors
 				}, scene);
 				stroke.mesh.material = new BABYLON.StandardMaterial('strokeMaterial', scene);
-				stroke.mesh.material.emissiveColor = stroke.colors;
+				stroke.mesh.material.emissiveColor = color.clone();
 			}
 			else if (activeTool.mode === 'ribbon') {
 				

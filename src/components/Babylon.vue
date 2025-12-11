@@ -47,6 +47,7 @@ let userAddedObjects = [],
   adjust,
   rightJoystick = { value: { x: 0, y: 0 } },
   joystickActive,
+  rightThumbstickComponent = null,
   draggedObjects = [],
   colorpickers = [],
   pickers = [];
@@ -149,6 +150,8 @@ class MenuItemBlock {
     this.enableWireframe(this.box, BABYLON.Color3.White());
     this.box.edgesColor.a = 0.5;
     this.box.isMenu = true;
+    this.box.isPickable = true; // Ensure menu items are pickable
+    this.box.checkCollisions = false; // Don't need physics collisions
     this.submenuItems = [];
     this.submenuOptions = ["line", "ribbon"];
     menuItems.push(this);
@@ -291,6 +294,7 @@ class MenuItemBlock {
           "menuItemMaterial",
           scene,
         );
+        submenuItem.mesh.isPickable = true; // Ensure submenu items are pickable
         submenuItem.mesh.position = gfx.movePoint(
           lineStart,
           subMenuLine.scale(2),
@@ -443,25 +447,26 @@ export default {
               xrHelper.input = xrHelper.baseExperience.input;
               this.addButtonEvents();
               console.log("XR input system initialized via baseExperience.input");
-            } else if (xrHelper.baseExperience.featuresManager) {
-              // Try enabling input feature manually
-              try {
-                const inputFeature = xrHelper.baseExperience.featuresManager.enableFeature(
-                  BABYLON.WebXRInputSource,
-                  'latest',
-                  { xrInput: xrHelper.baseExperience }
-                );
-                if (inputFeature && inputFeature.onControllerAddedObservable) {
-                  xrHelper.input = {
-                    onControllerAddedObservable: inputFeature.onControllerAddedObservable
-                  };
-                  this.addButtonEvents();
-                  console.log("XR input system initialized via featuresManager");
-                }
-              } catch (featError) {
-                console.warn("Failed to enable input feature:", featError);
+            } else {
+              // Input should be available directly on xrHelper in newer versions
+              // Wait for XR session to start before accessing controllers
+              if (xrHelper.baseExperience.sessionManager) {
+                xrHelper.baseExperience.sessionManager.onXRSessionInit.add(() => {
+                  // Input is typically available after session starts
+                  if (xrHelper.baseExperience.input) {
+                    xrHelper.input = xrHelper.baseExperience.input;
+                    this.addButtonEvents();
+                    console.log("XR input system initialized after session start");
+                  }
+                });
               }
             }
+          }
+          
+          // Also check if input is directly available on xrHelper
+          if (xrHelper.input) {
+            this.addButtonEvents();
+            console.log("XR input system initialized directly from xrHelper");
           }
           
           // Final check: if we still don't have input, log details for debugging
@@ -554,6 +559,27 @@ export default {
     },
 
     everyFrame: function () {
+      // Poll thumbstick value as fallback if observable didn't work
+      if (rightThumbstickComponent && rightThumbstickComponent.value !== undefined) {
+        const thumbValue = rightThumbstickComponent.value;
+        // value might be a Vector2 or object with x/y
+        const x = thumbValue.x !== undefined ? thumbValue.x : 0;
+        const y = thumbValue.y !== undefined ? thumbValue.y : 0;
+        
+        // Only update if value has changed significantly (avoid unnecessary updates)
+        if (Math.abs(rightJoystick.value.y - y) > 0.01 || Math.abs(rightJoystick.value.x - x) > 0.01) {
+          rightJoystick.value = { x: x, y: y };
+          
+          if (y > 0.2 || y < -0.2) {
+            joystickActive = true;
+            this.joystickRight(rightController, { x: x, y: y });
+            this.addjustCursorLength({ x: x, y: y });
+          } else if (Math.abs(y) < 0.1) {
+            this.rightJoystickRelease();
+          }
+        }
+      }
+      
       if (rightController && cursor) {
         const forwardRay = getControllerForwardRay(rightController, cursor.length);
         if (forwardRay) {
@@ -563,6 +589,71 @@ export default {
             cursor.position = controllerPos.add(
               forwardRay.direction.scale(cursor.length),
             );
+          }
+          
+          // Raycast to detect what controller is pointing at
+          // Use a longer ray to reach menu items (they're at distance ~8-11 units)
+          const rayLength = 20;
+          const ray = new BABYLON.Ray(forwardRay.origin, forwardRay.direction, rayLength);
+          
+          // First try without filter to see what we're hitting
+          const allHits = scene.pickWithRay(ray);
+          
+          // Then filter for menu items
+          const hit = scene.pickWithRay(ray, (mesh) => {
+            // Only pick menu items and submenu items (skip non-pickable meshes)
+            if (!mesh.isPickable) return false;
+            // Check if it's a menu item box
+            if (mesh.isMenu) {
+              return true;
+            }
+            // Check if it's a submenu item by checking if it has a getParent function
+            // that returns a MenuItemBlock
+            if (mesh.getParent && typeof mesh.getParent === 'function') {
+              try {
+                const parent = mesh.getParent();
+                if (parent && parent.submenuItems && Array.isArray(parent.submenuItems)) {
+                  return true;
+                }
+              } catch (e) {
+                // getParent might throw, ignore
+              }
+            }
+            return false;
+          });
+          
+          if (hit && hit.hit && hit.pickedMesh) {
+            picked = hit.pickedMesh;
+            
+            // Visual feedback: highlight menu item being pointed at
+            menuItems.forEach((menuItem) => {
+              if (picked === menuItem.box && !menuItem.active) {
+                // Temporarily highlight
+                menuItem.box.edgesColor = BABYLON.Color4.FromColor3(new BABYLON.Color3(1, 1, 0));
+                menuItem.box.edgesColor.a = 0.8;
+              } else if (picked !== menuItem.box && !menuItem.active) {
+                // Reset non-active menu items
+                menuItem.box.edgesColor = BABYLON.Color4.FromColor3(BABYLON.Color3.White());
+                menuItem.box.edgesColor.a = 0.5;
+              }
+            });
+          } else {
+            picked = null;
+            // Reset all non-active menu items when not pointing at anything
+            menuItems.forEach((menuItem) => {
+              if (!menuItem.active) {
+                menuItem.box.edgesColor = BABYLON.Color4.FromColor3(BABYLON.Color3.White());
+                menuItem.box.edgesColor.a = 0.5;
+              }
+            });
+            
+            // Debug: log what we're hitting if not a menu item
+            if (allHits && allHits.hit && allHits.pickedMesh && !allHits.pickedMesh.isMenu) {
+              // Only log occasionally to avoid spam
+              if (frameCount % 60 === 0) {
+                console.log("Ray hitting non-menu mesh:", allHits.pickedMesh.name, "isPickable:", allHits.pickedMesh.isPickable);
+              }
+            }
           }
         }
 
@@ -641,7 +732,11 @@ export default {
             cursor,
             activeColor,
           );
-          userAddedObjects.push(stroke.mesh);
+          // Only add the mesh once when it's first created
+          if (stroke.mesh && !stroke.meshAdded) {
+            userAddedObjects.push(stroke.mesh);
+            stroke.meshAdded = true;
+          }
         }
       }
       frameCount++;
@@ -654,6 +749,7 @@ export default {
       stroke.addingState = false;
       stroke.path1 = [];
       stroke.path2 = [];
+      stroke.meshAdded = false;
     },
 
     addCursor: function () {
@@ -987,8 +1083,11 @@ export default {
             );
             if (triggerComponent) {
               triggerComponent.onButtonStateChangedObservable.add((state) => {
-                if (triggerComponent.value >= 1) {
-                  this.buttonRightBackTrigger(motionController, state);
+                console.log("Right trigger value:", triggerComponent.value, "pressed:", state.pressed);
+                // Use pressed state or value threshold (triggers are analog, so use 0.5 threshold)
+                if (state.pressed || triggerComponent.value >= 0.5) {
+                  console.log("Right trigger pressed - calling buttonRightBackTrigger");
+                  this.buttonRightBackTrigger(rightController, state);
                 } else {
                   this.rightTriggerRelease();
                 }
@@ -1027,8 +1126,49 @@ export default {
               bButton.onButtonStateChangedObservable.add((state) => {
                 if (state.pressed && cursor && rightController) {
                   this.buttonRightB(rightController);
+                  // Start stroke drawing when B button is pressed with stroke tool active
+                  if (activeTool === strokeTool) {
+                    stroke.addingState = true;
+                    rightBActive = true;
+                  }
+                } else {
+                  // Stop stroke drawing when B button is released
+                  if (activeTool === strokeTool) {
+                    rightBActive = false;
+                    this.resetStroke();
+                  }
                 }
               });
+            }
+
+            // Add thumbstick/joystick input handling for right controller
+            // Try multiple possible component names for thumbstick
+            let thumbstickComponent = motionController.getComponent("xr-standard-thumbstick") ||
+                                     motionController.getComponent("thumbstick") ||
+                                     motionController.getComponent("xr-thumbstick");
+            if (thumbstickComponent) {
+              rightThumbstickComponent = thumbstickComponent;
+              
+              // Handle axis value changes via observable
+              if (thumbstickComponent.onAxisValueChangedObservable) {
+                thumbstickComponent.onAxisValueChangedObservable.add((state) => {
+                  // state might be a Vector2 or an object with x/y properties
+                  const x = state.x !== undefined ? state.x : (state.get ? state.get('x') : 0);
+                  const y = state.y !== undefined ? state.y : (state.get ? state.get('y') : 0);
+                  
+                  rightJoystick.value = { x: x, y: y };
+                  
+                  if (y > 0.2 || y < -0.2) {
+                    joystickActive = true;
+                    this.joystickRight(rightController, { x: x, y: y });
+                    this.addjustCursorLength({ x: x, y: y });
+                  } else {
+                    this.rightJoystickRelease();
+                  }
+                });
+              }
+            } else {
+              console.log("Thumbstick component not found. Available components:", motionController.getComponentIds());
             }
           }
         });
@@ -1383,7 +1523,76 @@ export default {
       }
     },
     buttonLeftBackTrigger: function (leftController) {},
-    buttonRightBackTrigger: function (rightController, state) {},
+    buttonRightBackTrigger: function (rightController, state) {
+      console.log("buttonRightBackTrigger called, picked:", picked);
+      if (!rightController) {
+        console.log("No right controller");
+        return;
+      }
+      
+      if (!picked) {
+        console.log("Nothing picked - trying to find what controller is pointing at");
+        // Try to do a fresh pick at cursor position
+        if (cursor && cursor.position) {
+          const forwardRay = getControllerForwardRay(rightController, 20);
+          if (forwardRay) {
+            const ray = new BABYLON.Ray(forwardRay.origin, forwardRay.direction, 20);
+            const hit = scene.pickWithRay(ray, (mesh) => {
+              if (!mesh.isPickable) return false;
+              if (mesh.isMenu) return true;
+              if (mesh.getParent && typeof mesh.getParent === 'function') {
+                const parent = mesh.getParent();
+                if (parent && parent.submenuItems) return true;
+              }
+              return false;
+            });
+            
+            if (hit && hit.hit && hit.pickedMesh) {
+              picked = hit.pickedMesh;
+              console.log("Found mesh via raycast:", picked.name, "isMenu:", picked.isMenu);
+            }
+          }
+        }
+      }
+      
+      if (!picked) {
+        console.log("Still nothing picked");
+        return;
+      }
+      
+      console.log("Processing selection for:", picked.name);
+      
+      // Check if pointing at a submenu item first
+      if (activeTool && activeTool.submenuItems) {
+        let submenuSelected = false;
+        activeTool.submenuItems.forEach((submenuItem) => {
+          if (picked === submenuItem.mesh) {
+            activeTool.setSubMenuActive(picked);
+            console.log("Selected submenu:", submenuItem.title);
+            submenuSelected = true;
+          }
+        });
+        if (submenuSelected) return; // Don't process menu item selection if submenu was selected
+      }
+      
+      // Check if pointing at a menu item (tool selection)
+      let toolSelected = false;
+      menuItems.forEach((menuItem) => {
+        if (picked === menuItem.box) {
+          // Select this tool
+          console.log("Selecting tool:", menuItem.title);
+          menuItem.setActive();
+          activeTool = menuItem;
+          this.updateTool(activeTool);
+          this.updateCursor(activeTool);
+          toolSelected = true;
+        }
+      });
+      
+      if (!toolSelected) {
+        console.log("No tool selected - picked mesh:", picked.name, "isMenu:", picked.isMenu);
+      }
+    },
     rightTriggerRelease: function () {
       dragging = false;
       draggedObjects = [];
@@ -1455,16 +1664,34 @@ export default {
       ground.material = new BABYLON.StandardMaterial("groundMaterial", scene);
       ground.material.emissiveColor = new BABYLON.Color3(1, 1, 1);
       ground.material.alpha = 0.05;
+      // Ensure ground doesn't interfere with picking
+      ground.checkCollisions = false;
 
-      var dome = new BABYLON.PhotoDome(
-        "starsBackdrop",
-        "/assets/img/stars.jpg",
-        {
-          resolution: 32,
-          size: 2000,
-        },
-        scene,
-      );
+      // Load image via fetch to avoid mixed content warnings with HTTPS + IP addresses
+      // This creates a blob URL that bypasses browser security restrictions
+      (async () => {
+        try {
+          const response = await fetch("/assets/img/stars.jpg");
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          const blob = await response.blob();
+          const blobUrl = URL.createObjectURL(blob);
+          
+          var dome = new BABYLON.PhotoDome(
+            "starsBackdrop",
+            blobUrl,
+            {
+              resolution: 32,
+              size: 2000,
+            },
+            scene,
+          );
+        } catch (error) {
+          console.warn("Failed to load stars.jpg backdrop:", error);
+          // Scene will continue without the backdrop
+        }
+      })();
     },
 
     showBabylonDebugger: function () {
