@@ -115,7 +115,7 @@ let gfx = (function () {
 		createUserStroke: function(controller, activeTool, stroke, cursor, color) {
 
 			if (!stroke.path.length) {
-				stroke.path.push(cursor.position);
+				stroke.path.push(cursor.position.clone());
 				stroke.colors = [];
 				stroke.colors.push(BABYLON.Color4.FromColor3(color));
 			}
@@ -130,40 +130,115 @@ let gfx = (function () {
 			
 			if (activeTool.mode === 'line') {
 				
+				// Check if we should add a new point
+				let shouldAddPoint = false;
 				if (stroke.path.length < 2) {
-					stroke.path.push(cursor.position);
-					stroke.colors.push(BABYLON.Color4.FromColor3(color));
+					shouldAddPoint = true;
 				}
 				else if (gfx.createVector(cursor.position, stroke.path[stroke.path.length-1]).length() > .05) {
-					stroke.path.push(cursor.position);
+					shouldAddPoint = true;
+				}
+				
+				if (shouldAddPoint) {
+					stroke.path.push(cursor.position.clone());
 					stroke.colors.push(BABYLON.Color4.FromColor3(color));
 				}
 				
-				if (stroke.mesh) stroke.mesh.dispose();
+				// Create material once and reuse it
+				if (!stroke.material) {
+					stroke.material = new BABYLON.StandardMaterial('strokeMaterial', scene);
+					stroke.material.emissiveColor = color.clone();
+					// Disable lighting for consistent color rendering
+					stroke.material.disableLighting = true;
+					// Set material properties to prevent rendering artifacts
+					stroke.material.specularColor = new BABYLON.Color3(0, 0, 0);
+					stroke.material.diffuseColor = new BABYLON.Color3(0, 0, 0);
+					// Ensure proper rendering
+					stroke.material.backFaceCulling = false;
+				}
+				
+				// Recreate mesh when path changes (but keep material)
+				// This is necessary because line meshes can't be easily updated without breaking raycasting
+				const wasAdded = stroke.mesh && stroke.meshAdded;
+				const oldMesh = stroke.mesh;
+				
+				if (stroke.mesh) {
+					stroke.mesh.dispose();
+				}
 				
 				stroke.mesh = BABYLON.MeshBuilder.CreateLines('userAddedStroke', {
 					points: stroke.path,
 					updatable: true,
 					colors: stroke.colors
 				}, scene);
-				stroke.mesh.material = new BABYLON.StandardMaterial('strokeMaterial', scene);
-				stroke.mesh.material.emissiveColor = color.clone();
+				stroke.mesh.material = stroke.material;
+				stroke.mesh.userAdded = true;
+				stroke.mesh.draggable = true;
+				// Make stroke non-pickable to avoid raycasting issues with line geometry
+				stroke.mesh.isPickable = false;
+				// Store the path points on the mesh for erase detection
+				// Make sure we store actual Vector3 clones
+				stroke.mesh._strokePath = stroke.path.map(function(p) {
+					if (p instanceof BABYLON.Vector3) {
+						return p.clone();
+					} else if (p && p.x !== undefined && p.y !== undefined && p.z !== undefined) {
+						return new BABYLON.Vector3(p.x, p.y, p.z);
+					}
+					return p;
+				});
+				// Preserve the meshAdded flag if it was already added
+				if (wasAdded) {
+					stroke.meshAdded = true;
+					// Update the reference in userAddedObjects if it exists
+					// Note: This assumes userAddedObjects is accessible - it should be in the component scope
+					// We'll need to handle this in the component that calls this function
+					stroke.mesh._needsArrayUpdate = true;
+					stroke.mesh._oldMeshRef = oldMesh;
+				}
+				
+				// Update material color if it changed
+				if (!stroke.material.emissiveColor.equals(color)) {
+					stroke.material.emissiveColor = color.clone();
+				}
 			}
 			else if (activeTool.mode === 'ribbon') {
 				
 				stroke.path1.push(gfx.movePoint(cursor.position, new BABYLON.Vector3(0, .05, 0)));
 				stroke.path2.push(gfx.movePoint(cursor.position, new BABYLON.Vector3(0, -.05, 0)));
 				stroke.colors.push(BABYLON.Color4.FromColor3(color));
-				if (stroke.mesh) stroke.mesh.dispose();
 				
-				stroke.mesh = BABYLON.MeshBuilder.CreateRibbon('userAddedStrokeRibbon', {pathArray: [stroke.path1, stroke.path2], sideOrientation: BABYLON.Mesh.DOUBLESIDE }, scene);
-				stroke.mesh.material = new BABYLON.StandardMaterial('strokeMaterial', scene);
-				stroke.mesh.material.ambientTexture = new BABYLON.Texture('/assets/img/grass.png', scene);
-				stroke.mesh.material.diffuseColor = color.clone();
-				stroke.mesh.material.emissiveColor = color.clone();
+				// Create material once and reuse it
+				if (!stroke.material) {
+					stroke.material = new BABYLON.StandardMaterial('strokeMaterial', scene);
+					stroke.material.ambientTexture = new BABYLON.Texture('/assets/img/grass.png', scene);
+					stroke.material.diffuseColor = color.clone();
+					stroke.material.emissiveColor = color.clone();
+				}
+				
+				// Recreate ribbon mesh when path changes (but keep material)
+				if (stroke.mesh) {
+					stroke.mesh.dispose();
+				}
+				
+				stroke.mesh = BABYLON.MeshBuilder.CreateRibbon('userAddedStrokeRibbon', {
+					pathArray: [stroke.path1, stroke.path2], 
+					sideOrientation: BABYLON.Mesh.DOUBLESIDE,
+					updatable: true
+				}, scene);
+				stroke.mesh.material = stroke.material;
+				stroke.mesh.userAdded = true;
+				stroke.mesh.draggable = true;
+				// Make stroke non-pickable to avoid raycasting issues
+				stroke.mesh.isPickable = false;
+				
+				// Update material colors if they changed
+				if (!stroke.material.diffuseColor.equals(color)) {
+					stroke.material.diffuseColor = color.clone();
+				}
+				if (!stroke.material.emissiveColor.equals(color)) {
+					stroke.material.emissiveColor = color.clone();
+				}
 			}
-			stroke.mesh.userAdded = true;
-			stroke.mesh.draggable = true;
 			
 			return stroke;
 		},

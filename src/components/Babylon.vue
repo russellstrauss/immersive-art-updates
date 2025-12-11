@@ -442,6 +442,29 @@ export default {
           if (xrHelper.baseExperience) {
             console.log("baseExperience found:", Object.keys(xrHelper.baseExperience));
             
+            // Listen for when VR session starts to initialize cursor
+            if (xrHelper.baseExperience.onStateChangedObservable) {
+              xrHelper.baseExperience.onStateChangedObservable.add((state) => {
+                // Check if we've entered VR (state might be a number or string)
+                const inVR = state === BABYLON.WebXRState?.IN_XR || 
+                            state === 'IN_XR' || 
+                            (typeof state === 'number' && state === 2); // IN_XR is typically 2
+                if (inVR) {
+                  console.log("Entered VR mode");
+                  // Initialize cursor when entering VR if not already initialized
+                  if (!cursor) {
+                    // Wait a bit for controllers to be available
+                    setTimeout(() => {
+                      if (!cursor) {
+                        // Create cursor even without controller (it will be positioned when controller is available)
+                        this.addCursor();
+                      }
+                    }, 200);
+                  }
+                }
+              });
+            }
+            
             // Try to access input through baseExperience
             if (xrHelper.baseExperience.input) {
               xrHelper.input = xrHelper.baseExperience.input;
@@ -457,6 +480,16 @@ export default {
                     xrHelper.input = xrHelper.baseExperience.input;
                     this.addButtonEvents();
                     console.log("XR input system initialized after session start");
+                  }
+                  // Initialize cursor when VR session starts
+                  if (!cursor) {
+                    setTimeout(() => {
+                      if (!cursor && rightController) {
+                        this.addCursor();
+                      } else if (!cursor) {
+                        this.addCursor();
+                      }
+                    }, 100);
                   }
                 });
               }
@@ -625,10 +658,11 @@ export default {
           if (hit && hit.hit && hit.pickedMesh) {
             picked = hit.pickedMesh;
             
-            // Visual feedback: highlight menu item being pointed at
+            // Visual feedback: highlight menu item or submenu item being pointed at
             menuItems.forEach((menuItem) => {
+              // Check if pointing at main menu item
               if (picked === menuItem.box && !menuItem.active) {
-                // Temporarily highlight
+                // Temporarily highlight menu item
                 menuItem.box.edgesColor = BABYLON.Color4.FromColor3(new BABYLON.Color3(1, 1, 0));
                 menuItem.box.edgesColor.a = 0.8;
               } else if (picked !== menuItem.box && !menuItem.active) {
@@ -636,14 +670,41 @@ export default {
                 menuItem.box.edgesColor = BABYLON.Color4.FromColor3(BABYLON.Color3.White());
                 menuItem.box.edgesColor.a = 0.5;
               }
+              
+              // Check if pointing at submenu items
+              if (menuItem.submenuItems && Array.isArray(menuItem.submenuItems)) {
+                menuItem.submenuItems.forEach((submenuItem) => {
+                  if (picked === submenuItem.mesh) {
+                    // Highlight submenu item
+                    submenuItem.mesh.edgesColor = BABYLON.Color4.FromColor3(new BABYLON.Color3(1, 1, 0));
+                    submenuItem.mesh.edgesColor.a = 0.8;
+                  } else {
+                    // Reset submenu item if it's not the active tool's submenu
+                    if (!menuItem.active || picked !== submenuItem.mesh) {
+                      submenuItem.mesh.edgesColor = BABYLON.Color4.FromColor3(BABYLON.Color3.White());
+                      submenuItem.mesh.edgesColor.a = 1;
+                    }
+                  }
+                });
+              }
             });
           } else {
             picked = null;
-            // Reset all non-active menu items when not pointing at anything
+            // Reset all non-active menu items and submenu items when not pointing at anything
             menuItems.forEach((menuItem) => {
               if (!menuItem.active) {
                 menuItem.box.edgesColor = BABYLON.Color4.FromColor3(BABYLON.Color3.White());
                 menuItem.box.edgesColor.a = 0.5;
+              }
+              
+              // Reset submenu items
+              if (menuItem.submenuItems && Array.isArray(menuItem.submenuItems)) {
+                menuItem.submenuItems.forEach((submenuItem) => {
+                  if (!menuItem.active || menuItem.selecting) {
+                    submenuItem.mesh.edgesColor = BABYLON.Color4.FromColor3(BABYLON.Color3.White());
+                    submenuItem.mesh.edgesColor.a = 1;
+                  }
+                });
               }
             });
             
@@ -737,15 +798,33 @@ export default {
             userAddedObjects.push(stroke.mesh);
             stroke.meshAdded = true;
           }
+          // If mesh was recreated and was already in the array, update the reference
+          if (stroke.mesh && stroke.mesh._needsArrayUpdate && stroke.mesh._oldMeshRef) {
+            const oldIndex = userAddedObjects.indexOf(stroke.mesh._oldMeshRef);
+            if (oldIndex > -1) {
+              userAddedObjects[oldIndex] = stroke.mesh;
+            }
+            stroke.mesh._needsArrayUpdate = false;
+            stroke.mesh._oldMeshRef = null;
+          }
         }
       }
       frameCount++;
     },
 
     resetStroke: function () {
+      // Don't dispose the mesh if it's already been added to userAddedObjects
+      // The mesh should persist as part of the user's artwork
+      if (stroke.mesh && !stroke.meshAdded) {
+        // Only dispose if it hasn't been added to userAddedObjects yet
+        stroke.mesh.dispose();
+        stroke.mesh = null;
+      }
+      // Don't dispose material - it might be shared or we want to keep it
+      // Just clear the reference
+      stroke.material = null;
       stroke.path = [];
       stroke.colors = [];
-      stroke.mesh = null;
       stroke.addingState = false;
       stroke.path1 = [];
       stroke.path2 = [];
@@ -1128,14 +1207,30 @@ export default {
                   this.buttonRightB(rightController);
                   // Start stroke drawing when B button is pressed with stroke tool active
                   if (activeTool === strokeTool) {
+                    // If we're already drawing, don't do anything - just continue
+                    // If we're not drawing, start a new stroke
+                    if (!stroke.addingState) {
+                      // Create a new stroke object, leaving the previous one intact
+                      // The previous stroke's mesh is already in userAddedObjects
+                      stroke = { 
+                        addingState: false, 
+                        path: [], 
+                        colors: [],
+                        path1: [],
+                        path2: [],
+                        meshAdded: false
+                      };
+                    }
                     stroke.addingState = true;
                     rightBActive = true;
                   }
                 } else {
-                  // Stop stroke drawing when B button is released
+                  // Stop stroke drawing when B button is released (but keep the stroke visible)
                   if (activeTool === strokeTool) {
                     rightBActive = false;
-                    this.resetStroke();
+                    stroke.addingState = false;
+                    // Don't reset the stroke - it should remain visible
+                    // Only reset when starting a new stroke (handled in buttonRightB)
                   }
                 }
               });
@@ -1517,8 +1612,75 @@ export default {
           gfx.createSphere(rightController, activeColor, cursor),
         );
       if (activeTool === eraseTool) {
+        const cursorRadius = 0.5 * (cursor.length || 1);
+        const cursorWorldPos = cursor.getAbsolutePosition();
+        
+        // Get cursor bounding info for intersection checking
+        const cursorBoundingInfo = cursor.getBoundingInfo();
+        
+        // Filter to get objects to erase (to avoid modifying array while iterating)
+        const objectsToErase = [];
+        
         userAddedObjects.forEach(function (object) {
-          if (object.intersectsMesh(cursor, true)) object.dispose();
+          if (!object || object.isDisposed) return;
+          
+          let shouldErase = false;
+          
+          try {
+            // Get bounding info for the object
+            const objectBoundingInfo = object.getBoundingInfo();
+            
+            if (objectBoundingInfo && cursorBoundingInfo) {
+              // Check if bounding spheres intersect using distance calculation
+              const objectCenter = objectBoundingInfo.boundingSphere.centerWorld;
+              const cursorCenter = cursorBoundingInfo.boundingSphere.centerWorld;
+              const distance = BABYLON.Vector3.Distance(objectCenter, cursorCenter);
+              const combinedRadius = objectBoundingInfo.boundingSphere.radiusWorld + cursorBoundingInfo.boundingSphere.radiusWorld;
+              
+              if (distance <= combinedRadius) {
+                // Check if this is a stroke mesh (by name or stored path data)
+                const isStrokeMesh = (object.name && object.name.includes('userAddedStroke')) || 
+                                     (object._strokePath && Array.isArray(object._strokePath) && object._strokePath.length > 0);
+                
+                if (isStrokeMesh) {
+                  // For stroke meshes, if bounding spheres intersect, erase it
+                  // This is reliable because bounding spheres work for all mesh types including lines
+                  shouldErase = true;
+                } else {
+                  // For non-stroke meshes, use bounding box intersection
+                  const cursorBoundingInfo = cursor.getBoundingInfo();
+                  if (cursorBoundingInfo) {
+                    shouldErase = objectBoundingInfo.boundingBox.intersects(cursorBoundingInfo.boundingBox);
+                  } else {
+                    // Fallback to bounding sphere intersection
+                    shouldErase = true;
+                  }
+                }
+              }
+            } else {
+              // No bounding info - try direct intersection as last resort
+              try {
+                shouldErase = object.intersectsMesh(cursor, true);
+              } catch (e) {
+                // Ignore errors
+              }
+            }
+          } catch (e) {
+            console.warn("Error checking object for erase:", e, object);
+          }
+          
+          if (shouldErase) {
+            objectsToErase.push(object);
+          }
+        });
+        
+        // Erase all objects that should be erased
+        objectsToErase.forEach(function (object) {
+          object.dispose();
+          const index = userAddedObjects.indexOf(object);
+          if (index > -1) {
+            userAddedObjects.splice(index, 1);
+          }
         });
       }
     },
